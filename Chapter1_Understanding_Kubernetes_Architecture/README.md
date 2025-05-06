@@ -7,7 +7,8 @@ Welcome to Chapter 1 of the "Master Kubernetes" 4th Edition repository. This cha
 - **[README.md](./README.md)**: This overview file
 - **[summary.md](./summary.md)**: Concise summary of key chapter concepts
 - **[images/](./images/)**: Architecture diagrams and visual aids
-  - **[kubernetes_architecture.md](./images/kubernetes_architecture.md)**: ASCII diagrams of Kubernetes components
+  - **[kubernetes_architecture.md](./images/kubernetes_architecture.md)**: Detailed architecture diagrams
+  - **[kubernetes_ascii_diagrams.md](./images/kubernetes_ascii_diagrams.md)**: ASCII-based diagrams for quick reference
 - **[exercises/](./exercises/)**: Hands-on practical exercises
   - **[01_exploring_k8s_components.md](./exercises/01_exploring_k8s_components.md)**: Exercise to explore Kubernetes components
   - **[02_container_runtime_exploration.md](./exercises/02_container_runtime_exploration.md)**: Exercise to understand container runtimes
@@ -28,6 +29,19 @@ This chapter covers:
 4. **Core Kubernetes Concepts**: Pods, services, deployments, and more
 5. **Kubernetes Architecture in Depth**: Control plane, node components, and their interactions
 6. **Kubernetes Container Runtimes**: CRI, containerd, CRI-O, and other runtime options
+
+## Visual References
+
+The chapter includes various diagrams to help visualize key concepts:
+
+1. **Kubernetes High-Level Architecture**: Overview of control plane and worker nodes
+2. **Container Runtime Interface (CRI)**: How kubelet communicates with different runtimes
+3. **Design Patterns**: Visualizations of sidecar, ambassador, and adapter patterns
+4. **Reconciliation Loop**: How Kubernetes maintains desired state
+5. **Resource Relationships**: How different Kubernetes resources relate to each other
+6. **Components Overview**: Detailed breakdown of all Kubernetes components
+
+Refer to the `images/kubernetes_ascii_diagrams.md` file for simple ASCII-based diagrams, which can serve as references for creating more sophisticated visualizations.
 
 ## Getting Started
 
