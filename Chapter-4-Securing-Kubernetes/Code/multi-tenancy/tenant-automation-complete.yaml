@@ -1,0 +1,556 @@
+# Complete Tenant Onboarding Automation System
+
+# Tenant Onboarding Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: tenant-onboard-
+  namespace: platform-system
+  labels:
+    app: tenant-onboarding
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: tenant-onboarding-sa
+      containers:
+      - name: onboard
+        image: tenant-onboarding:latest
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          
+          echo "Starting tenant onboarding for: $TENANT_NAME"
+          
+          # Validate required environment variables
+          required_vars=("TENANT_NAME" "ENVIRONMENT" "OWNER_EMAIL" "TENANT_TIER")
+          for var in "${required_vars[@]}"; do
+            if [[ -z "${!var:-}" ]]; then
+              echo "Error: Required variable $var is not set"
+              exit 1
+            fi
+          done
+          
+          # Load tier configuration
+          TIER_CONFIG=$(yq eval ".${TENANT_TIER}" /config/tenant-tiers.yaml)
+          if [[ "$TIER_CONFIG" == "null" ]]; then
+            echo "Error: Invalid tenant tier: $TENANT_TIER"
+            exit 1
+          fi
+          
+          # Extract tier-specific values
+          CPU_REQUESTS=$(echo "$TIER_CONFIG" | yq eval '.cpu_requests')
+          MEMORY_REQUESTS=$(echo "$TIER_CONFIG" | yq eval '.memory_requests')
+          CPU_LIMITS=$(echo "$TIER_CONFIG" | yq eval '.cpu_limits')
+          MEMORY_LIMITS=$(echo "$TIER_CONFIG" | yq eval '.memory_limits')
+          STORAGE_REQUESTS=$(echo "$TIER_CONFIG" | yq eval '.storage_requests')
+          POD_COUNT=$(echo "$TIER_CONFIG" | yq eval '.pod_count')
+          SERVICE_COUNT=$(echo "$TIER_CONFIG" | yq eval '.service_count')
+          MONTHLY_BUDGET=$(echo "$TIER_CONFIG" | yq eval '.monthly_budget')
+          PRIORITY_VALUE=$(echo "$TIER_CONFIG" | yq eval '.priority_value')
+          SECURITY_LEVEL=$(echo "$TIER_CONFIG" | yq eval '.security_level')
+          
+          # Set default values
+          CREATION_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          EXPIRY_DATE=${EXPIRY_DATE:-$(date -u -d "+1 year" +"%Y-%m-%dT%H:%M:%SZ")}
+          COST_CENTER=${COST_CENTER:-"DEFAULT"}
+          CONTACT_EMAIL=${CONTACT_EMAIL:-$OWNER_EMAIL}
+          ONBOARDED_BY=${ONBOARDED_BY:-"system"}
+          OWNER_TEAM=${OWNER_TEAM:-"default-team"}
+          
+          # Resource limits based on tier
+          case $TENANT_TIER in
+            "basic")
+              DEFAULT_CPU_LIMIT="200m"
+              DEFAULT_MEMORY_LIMIT="256Mi"
+              MAX_CPU_LIMIT="1"
+              MAX_MEMORY_LIMIT="2Gi"
+              ;;
+            "standard")
+              DEFAULT_CPU_LIMIT="500m"
+              DEFAULT_MEMORY_LIMIT="512Mi"
+              MAX_CPU_LIMIT="2"
+              MAX_MEMORY_LIMIT="4Gi"
+              ;;
+            "premium")
+              DEFAULT_CPU_LIMIT="1"
+              DEFAULT_MEMORY_LIMIT="1Gi"
+              MAX_CPU_LIMIT="8"
+              MAX_MEMORY_LIMIT="16Gi"
+              ;;
+          esac
+          
+          DEFAULT_STORAGE_LIMIT="1Gi"
+          DEFAULT_CPU_REQUEST="100m"
+          DEFAULT_MEMORY_REQUEST="128Mi"
+          DEFAULT_STORAGE_REQUEST="100Mi"
+          MAX_STORAGE_LIMIT="10Gi"
+          MIN_CPU_REQUEST="50m"
+          MIN_MEMORY_REQUEST="64Mi"
+          MIN_STORAGE_REQUEST="50Mi"
+          MAX_POD_CPU=${MAX_CPU_LIMIT}
+          MAX_POD_MEMORY=${MAX_MEMORY_LIMIT}
+          MAX_PVC_SIZE="100Gi"
+          MIN_PVC_SIZE="1Gi"
+          PVC_COUNT="10"
+          SECRET_COUNT="20"
+          CONFIGMAP_COUNT="20"
+          LOADBALANCER_COUNT="5"
+          NODEPORT_COUNT="10"
+          
+          # Check if tenant already exists
+          if kubectl get namespace "$TENANT_NAME" >/dev/null 2>&1; then
+            echo "Error: Tenant namespace $TENANT_NAME already exists"
+            exit 1
+          fi
+          
+          # Process template with all variables
+          echo "Processing tenant template..."
+          envsubst < /templates/tenant-template.yaml > /tmp/tenant-resources.yaml
+          
+          # Apply tenant resources
+          echo "Creating tenant resources..."
+          kubectl apply -f /tmp/tenant-resources.yaml
+          
+          # Wait for namespace to be ready
+          echo "Waiting for namespace to be ready..."
+          kubectl wait --for=condition=Active namespace/$TENANT_NAME --timeout=60s
+          
+          # Create initial secrets if provided
+          if [[ -n "${INITIAL_SECRETS:-}" ]]; then
+            echo "Creating initial secrets..."
+            echo "$INITIAL_SECRETS" | kubectl apply -n "$TENANT_NAME" -f -
+          fi
+          
+          # Create kubeconfig for tenant
+          echo "Creating tenant kubeconfig..."
+          ./create-tenant-kubeconfig.sh "$TENANT_NAME" "$OWNER_EMAIL"
+          
+          # Send notification
+          if [[ -n "${SLACK_WEBHOOK:-}" ]]; then
+            echo "Sending notification..."
+            curl -X POST "$SLACK_WEBHOOK" \
+              -H 'Content-type: application/json' \
+              --data "{
+                \"text\": \"🎉 Tenant onboarding completed!\",
+                \"attachments\": [{
+                  \"color\": \"good\",
+                  \"fields\": [
+                    {\"title\": \"Tenant Name\", \"value\": \"$TENANT_NAME\", \"short\": true},
+                    {\"title\": \"Environment\", \"value\": \"$ENVIRONMENT\", \"short\": true},
+                    {\"title\": \"Owner\", \"value\": \"$OWNER_EMAIL\", \"short\": true},
+                    {\"title\": \"Tier\", \"value\": \"$TENANT_TIER\", \"short\": true},
+                    {\"title\": \"Resources\", \"value\": \"CPU: $CPU_LIMITS, Memory: $MEMORY_LIMITS\", \"short\": false}
+                  ]
+                }]
+              }"
+          fi
+          
+          # Generate tenant report
+          echo "Generating tenant report..."
+          cat > /tmp/tenant-report.json << EOF
+          {
+            "tenant_name": "$TENANT_NAME",
+            "environment": "$ENVIRONMENT",
+            "owner_email": "$OWNER_EMAIL",
+            "tier": "$TENANT_TIER",
+            "created_at": "$CREATION_DATE",
+            "expires_at": "$EXPIRY_DATE",
+            "monthly_budget": "$MONTHLY_BUDGET",
+            "resources": {
+              "cpu_requests": "$CPU_REQUESTS",
+              "memory_requests": "$MEMORY_REQUESTS",
+              "cpu_limits": "$CPU_LIMITS",
+              "memory_limits": "$MEMORY_LIMITS",
+              "storage_requests": "$STORAGE_REQUESTS",
+              "max_pods": "$POD_COUNT",
+              "max_services": "$SERVICE_COUNT"
+            },
+            "security_level": "$SECURITY_LEVEL",
+            "status": "active"
+          }
+          EOF
+          
+          # Store report in ConfigMap for tracking
+          kubectl create configmap "tenant-report-$TENANT_NAME" \
+            --from-file=report.json=/tmp/tenant-report.json \
+            -n platform-system \
+            --dry-run=client -o yaml | kubectl apply -f -
+          
+          echo "✅ Tenant $TENANT_NAME onboarding completed successfully!"
+          echo "📋 Tenant Report:"
+          cat /tmp/tenant-report.json | jq .
+        
+        env:
+        - name: TENANT_NAME
+          value: "example-tenant"  # Override via Job parameters
+        - name: ENVIRONMENT
+          value: "production"
+        - name: OWNER_EMAIL
+          value: "owner@example.com"
+        - name: TENANT_TIER
+          value: "standard"
+        - name: COST_CENTER
+          value: "CC-12345"
+        - name: SLACK_WEBHOOK
+          valueFrom:
+            secretKeyRef:
+              name: notification-secrets
+              key: slack-webhook
+              optional: true
+        
+        volumeMounts:
+        - name: templates
+          mountPath: /templates
+        - name: config
+          mountPath: /config
+        - name: scripts
+          mountPath: /scripts
+        
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+      
+      volumes:
+      - name: templates
+        configMap:
+          name: tenant-onboarding-templates
+      - name: config
+        configMap:
+          name: tenant-onboarding-templates
+      - name: scripts
+        configMap:
+          name: tenant-onboarding-scripts
+          defaultMode: 0755
+---
+# Service Account for Tenant Onboarding
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tenant-onboarding-sa
+  namespace: platform-system
+---
+# ClusterRole for Tenant Onboarding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tenant-onboarding-role
+rules:
+# Namespace management
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "create", "update", "patch"]
+# Resource quota and limit range management
+- apiGroups: [""]
+  resources: ["resourcequotas", "limitranges"]
+  verbs: ["create", "update", "patch", "get", "list"]
+# Network policy management
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["create", "update", "patch", "get", "list"]
+# RBAC management
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings"]
+  verbs: ["create", "update", "patch", "get", "list"]
+# Service account management
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["create", "update", "patch", "get", "list"]
+# Priority class management
+- apiGroups: ["scheduling.k8s.io"]
+  resources: ["priorityclasses"]
+  verbs: ["create", "update", "patch", "get", "list"]
+# ConfigMap management for reports
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create", "update", "patch", "get", "list"]
+# Secret management
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create", "update", "patch", "get", "list"]
+---
+# ClusterRoleBinding for Tenant Onboarding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tenant-onboarding-binding
+subjects:
+- kind: ServiceAccount
+  name: tenant-onboarding-sa
+  namespace: platform-system
+roleRef:
+  kind: ClusterRole
+  name: tenant-onboarding-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Scripts ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-onboarding-scripts
+  namespace: platform-system
+data:
+  create-tenant-kubeconfig.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    
+    TENANT_NAME="$1"
+    USER_EMAIL="$2"
+    
+    echo "Creating kubeconfig for tenant: $TENANT_NAME"
+    
+    # Get cluster info
+    CLUSTER_NAME=$(kubectl config view --minify -o jsonpath='{.clusters[0].name}')
+    CLUSTER_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+    CLUSTER_CA=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+    
+    # Get service account token
+    SA_TOKEN=$(kubectl get secret "${TENANT_NAME}-sa-token" -n "$TENANT_NAME" -o jsonpath='{.data.token}' | base64 -d)
+    
+    # Create kubeconfig
+    cat > "/tmp/${TENANT_NAME}-kubeconfig.yaml" << EOF
+    apiVersion: v1
+    kind: Config
+    clusters:
+    - cluster:
+        certificate-authority-data: $CLUSTER_CA
+        server: $CLUSTER_SERVER
+      name: $CLUSTER_NAME
+    contexts:
+    - context:
+        cluster: $CLUSTER_NAME
+        namespace: $TENANT_NAME
+        user: ${TENANT_NAME}-user
+      name: ${TENANT_NAME}-context
+    current-context: ${TENANT_NAME}-context
+    users:
+    - name: ${TENANT_NAME}-user
+      user:
+        token: $SA_TOKEN
+    EOF
+    
+    echo "Kubeconfig created: /tmp/${TENANT_NAME}-kubeconfig.yaml"
+    
+    # Store kubeconfig as secret for tenant access
+    kubectl create secret generic "${TENANT_NAME}-kubeconfig" \
+      --from-file=kubeconfig="/tmp/${TENANT_NAME}-kubeconfig.yaml" \
+      -n "$TENANT_NAME" \
+      --dry-run=client -o yaml | kubectl apply -f -
+    
+    echo "Kubeconfig stored as secret: ${TENANT_NAME}-kubeconfig"
+  
+  validate-tenant.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    
+    TENANT_NAME="$1"
+    
+    echo "Validating tenant: $TENANT_NAME"
+    
+    # Check namespace exists
+    if ! kubectl get namespace "$TENANT_NAME" >/dev/null 2>&1; then
+      echo "❌ Namespace $TENANT_NAME does not exist"
+      exit 1
+    fi
+    echo "✅ Namespace exists"
+    
+    # Check resource quota
+    if ! kubectl get resourcequota "${TENANT_NAME}-quota" -n "$TENANT_NAME" >/dev/null 2>&1; then
+      echo "❌ Resource quota not found"
+      exit 1
+    fi
+    echo "✅ Resource quota exists"
+    
+    # Check limit range
+    if ! kubectl get limitrange "${TENANT_NAME}-limits" -n "$TENANT_NAME" >/dev/null 2>&1; then
+      echo "❌ Limit range not found"
+      exit 1
+    fi
+    echo "✅ Limit range exists"
+    
+    # Check network policies
+    NP_COUNT=$(kubectl get networkpolicy -n "$TENANT_NAME" --no-headers | wc -l)
+    if [[ $NP_COUNT -lt 2 ]]; then
+      echo "❌ Insufficient network policies (found: $NP_COUNT, expected: ≥2)"
+      exit 1
+    fi
+    echo "✅ Network policies exist ($NP_COUNT policies)"
+    
+    # Check RBAC
+    if ! kubectl get role "${TENANT_NAME}-role" -n "$TENANT_NAME" >/dev/null 2>&1; then
+      echo "❌ RBAC role not found"
+      exit 1
+    fi
+    echo "✅ RBAC role exists"
+    
+    if ! kubectl get rolebinding "${TENANT_NAME}-binding" -n "$TENANT_NAME" >/dev/null 2>&1; then
+      echo "❌ RBAC role binding not found"
+      exit 1
+    fi
+    echo "✅ RBAC role binding exists"
+    
+    # Check service account
+    if ! kubectl get serviceaccount "${TENANT_NAME}-sa" -n "$TENANT_NAME" >/dev/null 2>&1; then
+      echo "❌ Service account not found"
+      exit 1
+    fi
+    echo "✅ Service account exists"
+    
+    echo "🎉 Tenant $TENANT_NAME validation completed successfully!"
+  
+  cleanup-tenant.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    
+    TENANT_NAME="$1"
+    FORCE=${2:-false}
+    
+    echo "Starting cleanup for tenant: $TENANT_NAME"
+    
+    if [[ "$FORCE" != "true" ]]; then
+      echo "This will permanently delete tenant $TENANT_NAME and all its resources."
+      echo "To proceed, run with 'true' as second parameter."
+      exit 1
+    fi
+    
+    # Delete namespace (this will delete all resources within)
+    echo "Deleting namespace..."
+    kubectl delete namespace "$TENANT_NAME" --ignore-not-found=true
+    
+    # Delete cluster-level resources
+    echo "Deleting priority class..."
+    kubectl delete priorityclass "${TENANT_NAME}-priority" --ignore-not-found=true
+    
+    # Clean up tenant report
+    echo "Cleaning up tenant report..."
+    kubectl delete configmap "tenant-report-$TENANT_NAME" -n platform-system --ignore-not-found=true
+    
+    echo "✅ Tenant $TENANT_NAME cleanup completed!"
+---
+# Tenant Lifecycle CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tenant-lifecycle-manager
+  namespace: platform-system
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: tenant-onboarding-sa
+          containers:
+          - name: lifecycle-manager
+            image: tenant-onboarding:latest
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              
+              echo "Starting tenant lifecycle management..."
+              
+              # Check for expired tenants
+              CURRENT_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+              
+              # Get all tenant reports
+              kubectl get configmaps -n platform-system -l app=tenant-report -o json | \
+              jq -r '.items[] | select(.data."report.json" | fromjson | .expires_at < "'$CURRENT_DATE'") | .metadata.name' | \
+              while read -r report_name; do
+                TENANT_NAME=${report_name#tenant-report-}
+                echo "⚠️  Tenant $TENANT_NAME has expired"
+                
+                # Send expiration notification
+                if [[ -n "${SLACK_WEBHOOK:-}" ]]; then
+                  TENANT_INFO=$(kubectl get configmap "$report_name" -n platform-system -o jsonpath='{.data.report\.json}' | jq .)
+                  OWNER_EMAIL=$(echo "$TENANT_INFO" | jq -r '.owner_email')
+                  
+                  curl -X POST "$SLACK_WEBHOOK" \
+                    -H 'Content-type: application/json' \
+                    --data "{
+                      \"text\": \"⚠️ Tenant Expiration Alert\",
+                      \"attachments\": [{
+                        \"color\": \"warning\",
+                        \"fields\": [
+                          {\"title\": \"Tenant\", \"value\": \"$TENANT_NAME\", \"short\": true},
+                          {\"title\": \"Owner\", \"value\": \"$OWNER_EMAIL\", \"short\": true},
+                          {\"title\": \"Action Required\", \"value\": \"Please renew or cleanup tenant\", \"short\": false}
+                        ]
+                      }]
+                    }"
+                fi
+                
+                # Mark tenant as expired (add label)
+                kubectl label namespace "$TENANT_NAME" tenant-status=expired --overwrite || true
+              done
+              
+              # Check for tenants approaching expiration (30 days)
+              FUTURE_DATE=$(date -u -d "+30 days" +"%Y-%m-%dT%H:%M:%SZ")
+              
+              kubectl get configmaps -n platform-system -l app=tenant-report -o json | \
+              jq -r '.items[] | select(.data."report.json" | fromjson | .expires_at < "'$FUTURE_DATE'" and .expires_at > "'$CURRENT_DATE'") | .metadata.name' | \
+              while read -r report_name; do
+                TENANT_NAME=${report_name#tenant-report-}
+                echo "📅 Tenant $TENANT_NAME will expire within 30 days"
+                
+                # Send renewal notification
+                if [[ -n "${SLACK_WEBHOOK:-}" ]]; then
+                  TENANT_INFO=$(kubectl get configmap "$report_name" -n platform-system -o jsonpath='{.data.report\.json}' | jq .)
+                  OWNER_EMAIL=$(echo "$TENANT_INFO" | jq -r '.owner_email')
+                  EXPIRES_AT=$(echo "$TENANT_INFO" | jq -r '.expires_at')
+                  
+                  curl -X POST "$SLACK_WEBHOOK" \
+                    -H 'Content-type: application/json' \
+                    --data "{
+                      \"text\": \"📅 Tenant Renewal Reminder\",
+                      \"attachments\": [{
+                        \"color\": \"good\",
+                        \"fields\": [
+                          {\"title\": \"Tenant\", \"value\": \"$TENANT_NAME\", \"short\": true},
+                          {\"title\": \"Owner\", \"value\": \"$OWNER_EMAIL\", \"short\": true},
+                          {\"title\": \"Expires\", \"value\": \"$EXPIRES_AT\", \"short\": true},
+                          {\"title\": \"Action\", \"value\": \"Please renew tenant before expiration\", \"short\": false}
+                        ]
+                      }]
+                    }"
+                fi
+                
+                # Mark tenant as expiring soon
+                kubectl label namespace "$TENANT_NAME" tenant-status=expiring-soon --overwrite || true
+              done
+              
+              echo "✅ Tenant lifecycle management completed"
+            
+            env:
+            - name: SLACK_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: notification-secrets
+                  key: slack-webhook
+                  optional: true
+            
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                - ALL
