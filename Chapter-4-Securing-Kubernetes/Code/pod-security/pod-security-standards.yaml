@@ -1,0 +1,255 @@
+# Pod Security Standards Examples
+
+# Namespace with Baseline Pod Security Standard
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: baseline-namespace
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+# Pod that complies with Baseline standard
+apiVersion: v1
+kind: Pod
+metadata:
+  name: baseline-compliant-pod
+  namespace: baseline-namespace
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  
+  containers:
+  - name: app
+    image: nginx:alpine
+    securityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      capabilities:
+        drop:
+        - ALL
+      seccompProfile:
+        type: RuntimeDefault
+    
+    ports:
+    - containerPort: 8080
+    
+    volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+  
+  volumes:
+  - name: tmp
+    emptyDir: {}
+---
+# Namespace with Restricted Pod Security Standard
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: restricted-namespace
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Pod that complies with Restricted standard
+apiVersion: v1
+kind: Pod
+metadata:
+  name: restricted-compliant-pod
+  namespace: restricted-namespace
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  
+  containers:
+  - name: app
+    image: nginx:alpine
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      runAsNonRoot: true
+      runAsUser: 10001
+      runAsGroup: 10001
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL
+      seccompProfile:
+        type: RuntimeDefault
+    
+    ports:
+    - containerPort: 8080
+    
+    volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+    - name: var-cache
+      mountPath: /var/cache/nginx
+    - name: var-run
+      mountPath: /var/run
+    
+    resources:
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+  
+  volumes:
+  - name: tmp
+    emptyDir:
+      sizeLimit: "100Mi"
+  - name: var-cache
+    emptyDir:
+      sizeLimit: "50Mi"
+  - name: var-run
+    emptyDir:
+      sizeLimit: "10Mi"
+  
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+---
+# Deployment with Pod Security Standards
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-web-app
+  namespace: restricted-namespace
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: secure-web-app
+  template:
+    metadata:
+      labels:
+        app: secure-web-app
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      
+      containers:
+      - name: web
+        image: nginx:alpine
+        securityContext:
+          allowPrivilegeEscalation: false
+          privileged: false
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        
+        ports:
+        - containerPort: 8080
+        
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: var-cache
+          mountPath: /var/cache/nginx
+        - name: var-run
+          mountPath: /var/run
+        - name: html-content
+          mountPath: /usr/share/nginx/html
+          readOnly: true
+        
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+            ephemeral-storage: "1Gi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+            ephemeral-storage: "100Mi"
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: "100Mi"
+      - name: var-cache
+        emptyDir:
+          sizeLimit: "50Mi"
+      - name: var-run
+        emptyDir:
+          sizeLimit: "10Mi"
+      - name: html-content
+        configMap:
+          name: web-content
+      
+      serviceAccountName: secure-web-app-sa
+      automountServiceAccountToken: false
+      
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+---
+# Service Account for the secure application
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: secure-web-app-sa
+  namespace: restricted-namespace
+automountServiceAccountToken: false
+---
+# Minimal RBAC for the service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: restricted-namespace
+  name: secure-web-app-role
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["web-content"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: secure-web-app-binding
+  namespace: restricted-namespace
+subjects:
+- kind: ServiceAccount
+  name: secure-web-app-sa
+  namespace: restricted-namespace
+roleRef:
+  kind: Role
+  name: secure-web-app-role
+  apiGroup: rbac.authorization.k8s.io

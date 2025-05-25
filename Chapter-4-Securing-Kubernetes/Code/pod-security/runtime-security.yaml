@@ -1,0 +1,317 @@
+# Runtime Security Examples
+
+# gVisor Runtime Class
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+overhead:
+  podFixed:
+    memory: "20Mi"
+    cpu: "10m"
+scheduling:
+  nodeClassification:
+    tolerations:
+    - effect: NoSchedule
+      key: runtime
+      value: gvisor
+---
+# Pod using gVisor sandbox
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sandboxed-pod
+  namespace: production
+spec:
+  runtimeClassName: gvisor
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  
+  containers:
+  - name: app
+    image: nginx:alpine
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL
+    
+    volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+    - name: var-cache
+      mountPath: /var/cache/nginx
+  
+  volumes:
+  - name: tmp
+    emptyDir: {}
+  - name: var-cache
+    emptyDir: {}
+---
+# Kata Containers Runtime Class
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-containers
+handler: kata-runtime
+overhead:
+  podFixed:
+    memory: "160Mi"
+    cpu: "250m"
+scheduling:
+  nodeClassification:
+    tolerations:
+    - effect: NoSchedule
+      key: runtime
+      value: kata
+---
+# High-security workload using Kata Containers
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: high-security-workload
+  namespace: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: high-security-app
+  template:
+    metadata:
+      labels:
+        app: high-security-app
+    spec:
+      runtimeClassName: kata-containers
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      
+      containers:
+      - name: app
+        image: sensitive-app:latest
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        
+        env:
+        - name: SENSITIVE_DATA
+          valueFrom:
+            secretKeyRef:
+              name: sensitive-secrets
+              key: data
+        
+        resources:
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+        
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: app-data
+          mountPath: /app/data
+      
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: app-data
+        emptyDir: {}
+---
+# Falco Runtime Security Monitoring
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-rules
+  namespace: falco-system
+data:
+  custom_rules.yaml: |
+    - rule: Detect Privilege Escalation
+      desc: Detect attempts to escalate privileges in containers
+      condition: >
+        spawned_process and
+        proc.name in (sudo, su, doas) and
+        container
+      output: >
+        Privilege escalation attempt detected
+        (user=%user.name command=%proc.cmdline container=%container.name
+        image=%container.image.repository:%container.image.tag)
+      priority: WARNING
+      tags: [container, privilege_escalation]
+    
+    - rule: Detect Sensitive File Access
+      desc: Detect access to sensitive system files
+      condition: >
+        open_read and
+        fd.name in (/etc/passwd, /etc/shadow, /etc/sudoers, /root/.ssh/id_rsa) and
+        container
+      output: >
+        Sensitive file accessed in container
+        (user=%user.name file=%fd.name container=%container.name
+        image=%container.image.repository:%container.image.tag)
+      priority: ERROR
+      tags: [container, file_access]
+    
+    - rule: Detect Container Drift
+      desc: Detect when new executable is created in container
+      condition: >
+        spawned_process and
+        container and
+        proc.is_exe_upper_layer=true
+      output: >
+        New executable created in container
+        (user=%user.name command=%proc.cmdline container=%container.name
+        image=%container.image.repository:%container.image.tag file=%proc.exe)
+      priority: ERROR
+      tags: [container, drift]
+    
+    - rule: Detect Network Tool Usage
+      desc: Detect usage of network reconnaissance tools
+      condition: >
+        spawned_process and
+        proc.name in (nc, ncat, netcat, nmap, socat, tcpdump, tshark, wireshark) and
+        container
+      output: >
+        Network tool usage detected in container
+        (user=%user.name command=%proc.cmdline container=%container.name
+        image=%container.image.repository:%container.image.tag)
+      priority: WARNING
+      tags: [container, network]
+---
+# Falco DaemonSet
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falco
+  namespace: falco-system
+  labels:
+    app: falco
+spec:
+  selector:
+    matchLabels:
+      app: falco
+  template:
+    metadata:
+      labels:
+        app: falco
+    spec:
+      serviceAccount: falco
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/master
+      
+      containers:
+      - name: falco
+        image: falcosecurity/falco:latest
+        securityContext:
+          privileged: true
+        
+        args:
+        - /usr/bin/falco
+        - --cri=/run/containerd/containerd.sock
+        - -K=/var/run/secrets/kubernetes.io/serviceaccount/token
+        - -k=https://kubernetes.default
+        - -pk
+        
+        volumeMounts:
+        - mountPath: /host/var/run/docker.sock
+          name: docker-socket
+        - mountPath: /host/run/containerd/containerd.sock
+          name: containerd-socket
+        - mountPath: /host/dev
+          name: dev-fs
+        - mountPath: /host/proc
+          name: proc-fs
+          readOnly: true
+        - mountPath: /host/boot
+          name: boot-fs
+          readOnly: true
+        - mountPath: /host/lib/modules
+          name: lib-modules
+          readOnly: true
+        - mountPath: /host/usr
+          name: usr-fs
+          readOnly: true
+        - mountPath: /etc/falco/rules.d
+          name: falco-rules
+        
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "512Mi"
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+      
+      volumes:
+      - name: docker-socket
+        hostPath:
+          path: /var/run/docker.sock
+      - name: containerd-socket
+        hostPath:
+          path: /run/containerd/containerd.sock
+      - name: dev-fs
+        hostPath:
+          path: /dev
+      - name: proc-fs
+        hostPath:
+          path: /proc
+      - name: boot-fs
+        hostPath:
+          path: /boot
+      - name: lib-modules
+        hostPath:
+          path: /lib/modules
+      - name: usr-fs
+        hostPath:
+          path: /usr
+      - name: falco-rules
+        configMap:
+          name: falco-rules
+---
+# ServiceAccount for Falco
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: falco
+  namespace: falco-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: falco
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "namespaces", "pods", "replicationcontrollers", "services"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["daemonsets", "deployments", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: falco
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: falco
+subjects:
+- kind: ServiceAccount
+  name: falco
+  namespace: falco-system

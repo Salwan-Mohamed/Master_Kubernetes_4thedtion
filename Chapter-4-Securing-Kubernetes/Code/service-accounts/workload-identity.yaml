@@ -1,0 +1,83 @@
+# Workload Identity Configuration (GKE/AWS IRSA)
+# Google Kubernetes Engine Workload Identity
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gke-workload-identity-sa
+  namespace: production
+  annotations:
+    # Link to Google Cloud Service Account
+    iam.gke.io/gcp-service-account: webapp@my-project.iam.gserviceaccount.com
+automountServiceAccountToken: true
+---
+# AWS IAM Roles for Service Accounts (IRSA)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aws-irsa-sa
+  namespace: production
+  annotations:
+    # Link to AWS IAM Role
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/webapp-role
+automountServiceAccountToken: true
+---
+# Azure Workload Identity
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: azure-workload-identity-sa
+  namespace: production
+  annotations:
+    # Link to Azure Managed Identity
+    azure.workload.identity/client-id: "12345678-1234-1234-1234-123456789012"
+  labels:
+    azure.workload.identity/use: "true"
+automountServiceAccountToken: true
+---
+# Pod using workload identity
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloud-native-app
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cloud-native-app
+  template:
+    metadata:
+      labels:
+        app: cloud-native-app
+        azure.workload.identity/use: "true"  # For Azure Workload Identity
+    spec:
+      serviceAccountName: azure-workload-identity-sa  # Change as needed
+      containers:
+      - name: app
+        image: cloud-native-app:latest
+        env:
+        # These environment variables are automatically injected
+        # by the respective cloud workload identity systems
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/var/secrets/google/key.json"  # GKE only
+        - name: AWS_ROLE_ARN
+          value: "arn:aws:iam::123456789012:role/webapp-role"  # EKS only
+        - name: AZURE_CLIENT_ID
+          value: "12345678-1234-1234-1234-123456789012"  # AKS only
+        
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"

@@ -1,0 +1,55 @@
+# Service Account with Token Projection
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-client-sa
+  namespace: production
+  annotations:
+    vault.hashicorp.com/role: "webapp-role"
+automountServiceAccountToken: false
+---
+# Pod with projected service account token
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vault-client-pod
+  namespace: production
+spec:
+  serviceAccountName: vault-client-sa
+  containers:
+  - name: app
+    image: vault:latest
+    command:
+    - /bin/sh
+    - -c
+    - |
+      # Read the projected token
+      TOKEN=$(cat /var/run/secrets/tokens/vault-token)
+      echo "Token audience: vault"
+      echo "Token path: /var/run/secrets/tokens/vault-token"
+      
+      # Use token for Vault authentication
+      vault write auth/kubernetes/login role=webapp-role jwt=$TOKEN
+      
+      # Keep container running
+      sleep 3600
+    volumeMounts:
+    - name: vault-token
+      mountPath: /var/run/secrets/tokens
+      readOnly: true
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL
+  volumes:
+  - name: vault-token
+    projected:
+      sources:
+      - serviceAccountToken:
+          path: vault-token
+          expirationSeconds: 3600
+          audience: vault

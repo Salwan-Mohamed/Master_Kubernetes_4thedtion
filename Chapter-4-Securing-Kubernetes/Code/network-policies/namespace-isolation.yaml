@@ -1,0 +1,159 @@
+# Namespace Isolation Network Policies
+
+# Production namespace isolation
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: production-isolation
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from same namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: production
+  # Allow from ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+  # Allow from monitoring
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9090
+  egress:
+  # Allow DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow to same namespace
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: production
+  # Allow to external services (HTTPS)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+---
+# Development namespace isolation
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: development-isolation
+  namespace: development
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from same namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: development
+  # Allow from staging (for integration testing)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: staging
+  # Allow from ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+  egress:
+  # Allow DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow to same namespace
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: development
+  # Allow to staging
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: staging
+  # Allow to external services
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+---
+# Cross-namespace communication policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-access
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      monitoring: "true"
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow monitoring namespace to scrape metrics
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9090
+    - protocol: TCP
+      port: 8080
+---
+# Shared services access policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shared-services-access
+  namespace: shared-services
+spec:
+  podSelector:
+    matchLabels:
+      shared: "true"
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow from production
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: production
+  # Allow from staging
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: staging
+  # Allow from development
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: development
+    ports:
+    - protocol: TCP
+      port: 6379  # Redis
+    - protocol: TCP
+      port: 5432  # PostgreSQL
+    - protocol: TCP
+      port: 9200  # Elasticsearch

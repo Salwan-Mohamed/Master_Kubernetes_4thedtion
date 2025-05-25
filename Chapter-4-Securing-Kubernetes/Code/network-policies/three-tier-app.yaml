@@ -1,0 +1,213 @@
+# Three-Tier Application Network Policies
+
+# Web Tier Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-tier-policy
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      tier: web
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  # Allow to API tier
+  - to:
+    - podSelector:
+        matchLabels:
+          tier: api
+    ports:
+    - protocol: TCP
+      port: 8080
+  # Allow DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+---
+# API Tier Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-tier-policy
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      tier: api
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from web tier
+  - from:
+    - podSelector:
+        matchLabels:
+          tier: web
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  # Allow to database tier
+  - to:
+    - podSelector:
+        matchLabels:
+          tier: database
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow to external APIs (example)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+---
+# Database Tier Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: database-tier-policy
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      tier: database
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from API tier only
+  - from:
+    - podSelector:
+        matchLabels:
+          tier: api
+    ports:
+    - protocol: TCP
+      port: 5432
+  egress:
+  # Allow DNS only (for internal resolution)
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+---
+# Example pods for the three-tier application
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-tier
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      tier: web
+      app: webapp
+  template:
+    metadata:
+      labels:
+        tier: web
+        app: webapp
+        expose: "true"
+    spec:
+      containers:
+      - name: web
+        image: nginx:alpine
+        ports:
+        - containerPort: 8080
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-tier
+  namespace: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      tier: api
+      app: api
+  template:
+    metadata:
+      labels:
+        tier: api
+        app: api
+    spec:
+      containers:
+      - name: api
+        image: node:alpine
+        ports:
+        - containerPort: 8080
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: database-tier
+  namespace: production
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      tier: database
+      app: postgres
+  template:
+    metadata:
+      labels:
+        tier: database
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: "webapp"
+        - name: POSTGRES_USER
+          value: "webapp"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-secret
+              key: password
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
